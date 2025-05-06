@@ -9,7 +9,7 @@ interface Message {
   sender: 'user' | 'agent';
 }
 
-const N8N_WEBHOOK_URL = "https://n8n-production-f196.up.railway.app/workflow/nzCuf9XpvJ4QRi6P";
+const N8N_WEBHOOK_URL = "https://n8n-production-f196.up.railway.app/webhook-test/n8n";
 
 export default function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([]);
