@@ -9,6 +9,7 @@ import {
   Pause,
   Play,
   VolumeX,
+  Square, // Added Square icon
 } from "lucide-react";
 
 interface Message {
@@ -56,14 +57,9 @@ export default function ChatInterface() {
   const micOffSoundRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
-    // Initialize placeholder audio elements for mic on/off sounds
-    // User should replace '/sounds/mic-on.wav' and '/sounds/mic-off.wav' with actual paths to their sound files
     if (typeof Audio !== "undefined") {
-      micOnSoundRef.current = new Audio("/sounds/mic-on.wav"); // Placeholder path
-      micOffSoundRef.current = new Audio("/sounds/mic-off.wav"); // Placeholder path
-      // Preload can be attempted, but browsers might restrict it
-      // micOnSoundRef.current.preload = "auto";
-      // micOffSoundRef.current.preload = "auto";
+      micOnSoundRef.current = new Audio("/sounds/mic-on.wav");
+      micOffSoundRef.current = new Audio("/sounds/mic-off.wav");
     }
   }, []);
 
@@ -75,7 +71,7 @@ export default function ChatInterface() {
     micOffSoundRef.current?.play().catch(e => console.warn("Mic off sound play failed:", e));
   };
 
-  const stopAgentAudio = () => {
+  const stopAgentAudioPlayback = () => {
     if (agentAudioRef.current) {
       agentAudioRef.current.pause();
       agentAudioRef.current.currentTime = 0;
@@ -85,7 +81,7 @@ export default function ChatInterface() {
   };
 
   const speakText = (text: string, audioData?: string) => {
-    stopAgentAudio(); // Stop any previous agent audio
+    stopAgentAudioPlayback();
 
     if (audioData) {
       try {
@@ -98,7 +94,6 @@ export default function ChatInterface() {
         agentAudioRef.current.play().catch((e) => {
           console.error("Error playing agent audio:", e);
           setIsAgentSpeaking(false);
-          // Fallback to browser synthesis if direct play fails for some reason
           const utterance = new SpeechSynthesisUtterance(text);
           utterance.onstart = () => setIsAgentSpeaking(true);
           utterance.onend = () => setIsAgentSpeaking(false);
@@ -111,14 +106,14 @@ export default function ChatInterface() {
         console.error("Error setting up agent audio from data:", e);
         setIsAgentSpeaking(false);
       }
-    } else if ("speechSynthesis" in window) {
+    } else if (text && "speechSynthesis" in window) {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.onstart = () => setIsAgentSpeaking(true);
       utterance.onend = () => setIsAgentSpeaking(false);
       utterance.onerror = () => setIsAgentSpeaking(false);
       window.speechSynthesis.speak(utterance);
-    } else {
-      console.warn("Speech Synthesis API not supported in this browser.");
+    } else if (text) {
+      console.warn("Speech Synthesis API not supported or no text to speak.");
     }
   };
 
@@ -133,6 +128,7 @@ export default function ChatInterface() {
   const sendTextMessage = async (textToSend: string) => {
     if (textToSend.trim() === "" || isLoading) return;
     clearMicTimeout();
+    stopAgentAudioPlayback();
 
     const newUserMessage: Message = {
       id: Date.now().toString(),
@@ -169,7 +165,7 @@ export default function ChatInterface() {
       if (data && (data.reply || data.audioData)) {
         const agentResponse: Message = {
           id: (Date.now() + 1).toString(),
-          text: data.reply || "", // Use empty string if only audioData is present
+          text: data.reply || "",
           sender: "agent",
         };
         setMessages((prevMessages) => [...prevMessages, agentResponse]);
@@ -210,15 +206,22 @@ export default function ChatInterface() {
       recognitionRef.current = new SpeechRecognitionAPI() as CustomSpeechRecognition;
       const recognition = recognitionRef.current;
       recognition.continuous = false;
-      recognition.interimResults = false;
+      recognition.interimResults = true; // Enable interim results for faster feedback
       recognition.lang = "en-US";
 
       recognition.onresult = (event) => {
-        clearMicTimeout();
-        const transcript = event.results[0][0].transcript;
-        sendTextMessage(transcript);
-        setIsListening(false);
-        playMicOffSound();
+        let finalTranscript = "";
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript;
+          }
+        }
+        if (finalTranscript) {
+          clearMicTimeout();
+          sendTextMessage(finalTranscript);
+          setIsListening(false);
+          playMicOffSound();
+        }
       };
 
       recognition.onerror = (event) => {
@@ -244,13 +247,12 @@ export default function ChatInterface() {
       };
 
       recognition.onend = () => {
-        // This onend can be triggered by stop() or naturally.
-        // If it wasn't a manual pause, ensure listening state is false.
-        if (!isMicManuallyPaused) {
+        if (!isMicManuallyPaused && isListening) {
+            // If onend is called and it wasn't a manual pause or a result,
+            // it might be due to timeout or an unexpected stop.
             setIsListening(false);
+            playMicOffSound();
         }
-        // Don't clear timeout here if it was due to timeout itself.
-        // playMicOffSound(); // Already called in onresult and onerror
       };
     } else {
       console.warn("Speech Recognition API not supported in this browser.");
@@ -259,16 +261,16 @@ export default function ChatInterface() {
     return () => {
       clearMicTimeout();
       if (recognitionRef.current && (isListening || isMicManuallyPaused)) {
-        recognitionRef.current.stop();
+        recognitionRef.current.abort(); // Use abort to stop listening immediately
       }
-      stopAgentAudio();
+      stopAgentAudioPlayback();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // isMicManuallyPaused removed from deps to avoid re-init on pause
+  }, []);
 
   const startListening = () => {
     if (!recognitionRef.current) return;
-    stopAgentAudio(); // Interrupt agent if speaking
+    stopAgentAudioPlayback();
     setInputValue("");
     recognitionRef.current.start();
     setIsListening(true);
@@ -279,34 +281,22 @@ export default function ChatInterface() {
     let progress = 0;
     setMicTimeoutProgress(0);
     micTimeoutIdRef.current = setInterval(() => {
-      progress += 100; // Update every 100ms
+      progress += 100;
       const percentage = (progress / MIC_TIMEOUT_DURATION) * 100;
       setMicTimeoutProgress(percentage);
       if (progress >= MIC_TIMEOUT_DURATION) {
         clearMicTimeout();
         if (recognitionRef.current && isListening && !isMicManuallyPaused) {
           console.log("Mic timeout, stopping recognition.");
-          recognitionRef.current.stop(); // This will trigger onresult or onerror
-          // Note: onresult will handle sending the message
+          recognitionRef.current.stop();
         }
-        setIsListening(false); // Ensure listening is set to false
+        setIsListening(false);
         playMicOffSound();
       }
     }, 100);
   };
 
-  const stopListening = (manualStop: boolean = true) => {
-    clearMicTimeout();
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-    }
-    setIsListening(false);
-    if (manualStop) {
-        playMicOffSound();
-    }
-  };
-
-  const handleMicClick = () => {
+  const handleMicButtonClick = () => {
     if (!recognitionRef.current) {
       const noSupportText = "Sorry, voice input is not supported in your browser.";
       setMessages((prevMessages) => [
@@ -319,11 +309,9 @@ export default function ChatInterface() {
 
     if (isListening && !isMicManuallyPaused) { // Currently listening, about to pause
       setIsMicManuallyPaused(true);
-      clearMicTimeout(); // Pause the timer
-      if (recognitionRef.current) {
-        recognitionRef.current.stop(); // Stop current recognition to pause
-      }
-      // Don't play mic off sound for manual pause, as it's not truly off
+      clearMicTimeout();
+      recognitionRef.current.stop();
+      // Don't play mic off sound for manual pause
     } else { // Not listening OR manually paused, about to start/resume
       navigator.mediaDevices
         .getUserMedia({ audio: true })
@@ -360,15 +348,6 @@ export default function ChatInterface() {
         Chat with RAG Agent
       </h1>
       <div className="relative">
-        {isAgentSpeaking && (
-            <button 
-                onClick={stopAgentAudio}
-                className="absolute top-0 right-0 mt-1 mr-1 z-10 p-2 bg-gray-300 hover:bg-gray-400 rounded-full text-gray-700"
-                title="Stop agent audio"
-            >
-                <VolumeX size={20} />
-            </button>
-        )}
         <div
             ref={chatContainerRef}
             className="h-[60vh] border border-gray-300 rounded-lg p-4 mb-4 overflow-y-auto bg-gray-50 space-y-4"
@@ -411,6 +390,15 @@ export default function ChatInterface() {
       )}
 
       <div className="flex items-center border-t border-gray-200 pt-4">
+        {isAgentSpeaking && (
+          <button 
+            onClick={stopAgentAudioPlayback}
+            className="p-3 mr-2 border border-gray-300 rounded-md hover:bg-gray-100"
+            title="Stop agent audio"
+          >
+            <Square size={24} className="text-red-500"/>
+          </button>
+        )}
         <input
           type="text"
           value={inputValue}
@@ -421,13 +409,13 @@ export default function ChatInterface() {
           disabled={isLoading || (isListening && !isMicManuallyPaused)}
         />
         <button
-          onClick={handleMicClick}
-          className={`p-3 border-y border-l border-gray-300 transition-colors duration-150 ease-in-out disabled:opacity-50 ${
+          onClick={handleMicButtonClick}
+          className={`p-3 border-y border-gray-300 transition-colors duration-150 ease-in-out disabled:opacity-50 ${
             isListening && !isMicManuallyPaused
-              ? "bg-red-500 hover:bg-red-600 text-white" // Listening active -> show StopCircle (to stop and send)
+              ? "bg-red-500 hover:bg-red-600 text-white"
               : isMicManuallyPaused 
-              ? "bg-yellow-500 hover:bg-yellow-600 text-white" // Manually Paused -> show Play (to resume)
-              : "bg-gray-200 hover:bg-gray-300 text-gray-600" // Idle -> show Mic (to start)
+              ? "bg-yellow-500 hover:bg-yellow-600 text-white"
+              : "bg-gray-200 hover:bg-gray-300 text-gray-600"
           }`}
           title={
             isListening && !isMicManuallyPaused
